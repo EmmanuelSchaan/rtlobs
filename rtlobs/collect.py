@@ -290,7 +290,9 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
     -------
     freqs
         Frequencies of the resulting spectrum, centered at fc (Hz), numpy array
-    p_avg_db_hz
+    p_avg_hz
+        Power spectral density in (V^2/Hz) numpy array
+    no longer outputed: p_avg_db_hz
         Power spectral density (dB/Hz) numpy array
     '''
     # Force a choice of window to allow converting to PSD after averaging
@@ -378,6 +380,7 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
         win = get_window(WINDOW, nperseg)
         p_avg_hz = p_avg * ((win.sum()**2) / (win*win).sum()) / rate
 
+        # Convert to "dB/Hz" if desired
         p_avg_db_hz = 10. * np.log10(p_avg_hz)
 
         # Shift frequency spectra back to the intended range
@@ -394,7 +397,7 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
         if sdr is not None and close_sdr:
             sdr.close()
 
-    return freqs, p_avg_db_hz
+    return freqs, p_avg_hz#, p_avg_db_hz
 
 
 def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, sdr=None):
@@ -432,11 +435,19 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
 
     Returns
     -------
+    freqs_on
+        frequencies around the fiducial frequency [Hz]
+    p_avg_on
+        power spectrum around fiducial frequency [V^2/Hz]
+    freqs_off
+        frequencies around the shifted frequency [Hz]
+    p_avg_off
+        power spectrum around shifted frequency [V^2/Hz]
     freqs_fold
         Frequencies of the spectrum resulting from folding according to the
         folding method implemented in the f_throw_fold (post_process module)
     p_fold
-        Folded frequency-switched power, centered at fc,(uncalibrated V^2)
+        Folded frequency-switched power, centered at fc,[V^2/Hz]
         numpy array.
     '''
 
@@ -546,6 +557,23 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         # Fold switched power spectra
         freqs_fold, p_fold = f_throw_fold(freqs_on, freqs_off, p_avg_on, p_avg_off)
 
+        # Convert to power spectral density
+        # A great resource that helped me understand the difference:
+        # https://community.sw.siemens.com/s/article/what-is-a-power-spectral-density-psd
+        # We could just divide by the bandwidth, but welch() applies a
+        # windowing correction to the spectrum, and does it differently to
+        # power spectra and PSDs. We multiply by the power spectrum correction 
+        # factor to remove it and divide by the PSD correction to apply it 
+        # instead. Then divide by the bandwidth to get the power per unit 
+        # frequency.
+        # See the scipy docs for _spectral_helper().
+        win = get_window(WINDOW, nperseg)
+        p_avg_on_hz = p_avg_on * ((win.sum()**2) / (win*win).sum()) / rate
+        p_avg_off_hz = p_avg_off * ((win.sum()**2) / (win*win).sum()) / rate
+        p_fold_hz = p_fold * ((win.sum()**2) / (win*win).sum()) / rate
+
+
+
         if close_sdr:
             # nice and tidy
             sdr.close()
@@ -557,7 +585,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         if sdr is not None and close_sdr:
             sdr.close()
 
-    return freqs_fold, p_fold
+    return freqs_on, p_avg_on_hz, freqs_off, p_avg_off_hz, freqs_fold, p_fold_hz
 
 
 def save_spectrum(filename, freqs, p_xx):
