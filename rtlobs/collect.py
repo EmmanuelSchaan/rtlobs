@@ -443,13 +443,17 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         frequencies around the shifted frequency [Hz]
     p_avg_off
         power spectrum around shifted frequency [V^2/Hz]
-    freqs_fold
+    no longer outputed: freqs_fold
         Frequencies of the spectrum resulting from folding according to the
         folding method implemented in the f_throw_fold (post_process module)
-    p_fold
+    no longer outputed: p_fold
         Folded frequency-switched power, centered at fc,[V^2/Hz]
         numpy array.
     '''
+    # Force a choice of window to allow converting to PSD after averaging
+    # power spectra
+    WINDOW = 'hann'
+    nperseg = nbins
 
     from .post_process import f_throw_fold 
 
@@ -519,6 +523,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
                         nperseg=nbins,
                         noverlap=0,
                         scaling='spectrum',
+                        window=WINDOW,
                         detrend=False,
                         return_onesided=False
                     )
@@ -530,6 +535,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
                         nperseg=nbins,
                         noverlap=0,
                         scaling='spectrum',
+                        window=WINDOW,
                         detrend=False,
                         return_onesided=False
                     )
@@ -555,7 +561,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         freqs_off = freqs_off + fthrow
 
         # Fold switched power spectra
-        freqs_fold, p_fold = f_throw_fold(freqs_on, freqs_off, p_avg_on, p_avg_off)
+        #freqs_fold, p_fold = f_throw_fold(freqs_on, freqs_off, p_avg_on, p_avg_off)
 
         # Convert to power spectral density
         # A great resource that helped me understand the difference:
@@ -570,7 +576,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         win = get_window(WINDOW, nperseg)
         p_avg_on_hz = p_avg_on * ((win.sum()**2) / (win*win).sum()) / rate
         p_avg_off_hz = p_avg_off * ((win.sum()**2) / (win*win).sum()) / rate
-        p_fold_hz = p_fold * ((win.sum()**2) / (win*win).sum()) / rate
+        #p_fold_hz = p_fold * ((win.sum()**2) / (win*win).sum()) / rate
 
 
 
@@ -585,7 +591,7 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         if sdr is not None and close_sdr:
             sdr.close()
 
-    return freqs_on, p_avg_on_hz, freqs_off, p_avg_off_hz, freqs_fold, p_fold_hz
+    return freqs_on, p_avg_on_hz, freqs_off, p_avg_off_hz#, freqs_fold, p_fold_hz
 
 
 def save_spectrum(filename, freqs, p_xx):
