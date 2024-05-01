@@ -321,6 +321,7 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
         logging.debug('  num samples per call: {}'.format(num_samp))
         logging.debug('  PSD binning: {} bins'.format(nbins))
         logging.debug('  requested integration time: {}s'.format(t_int))
+        # Total number of samples to collect
         N = int(sdr.rs * t_int)
         num_loops = int(N / num_samp) + 1
         logging.debug('  => num samples to collect: {}'.format(N))
@@ -350,22 +351,40 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
         # huge arrays of iq samples around in RAM.
         
         # Time integration loop
-        for cnt in range(num_loops):
+        # collect num_loops * num_samp samples total
+        for j in range(num_loops):
             iq = sdr.read_samples(num_samp)
             # compensate for DC spike
             iq = (iq.real - iq.real.mean()) + (1j * (iq.imag - iq.imag.mean()))
-            freqs, p_xx = welch(iq, fs=rate, nperseg=nperseg, nfft=nbins, noverlap=0, scaling='spectrum', window=WINDOW, detrend=False, return_onesided=False)
+
+            # estimate power spectrum of current samples
+            freqs, p_xx = welch(
+                  iq, 
+                  fs=rate, 
+                  nperseg=nperseg, 
+                  nfft=nbins, 
+                  noverlap=0, 
+                  scaling='spectrum', 
+                  window=WINDOW, 
+                  detrend=False, 
+                  return_onesided=False)
             p_xx_tot += p_xx
+            cnt += 1
+
+        # Compute the average power spectrum based on the number of spectra read
+        p_xx_tot /= cnt
+
         end_time = time.time()
         logging.info('Integration ended at {} after {} seconds.'.format(time.strftime('%a, %d %b %Y %H:%M:%S'), end_time-start_time))
         logging.debug('{} spectra were measured at {}.'.format(cnt, fc))
         logging.debug('for an effective integration time of {:.2f}s'.format(num_samp * cnt / rate))
 
+        # Reorder the frequencies so that zero is centered
         freqs = np.fft.fftshift(freqs)
         p_xx_tot = np.fft.fftshift(p_xx_tot)
 
-        # Compute the average power spectrum based on the number of spectra read
-        p_avg = p_xx_tot / cnt
+        # Shift frequency spectra back to the intended range
+        freqs += fc
 
         # Convert to power spectral density
         # A great resource that helped me understand the difference:
@@ -378,13 +397,11 @@ def run_spectrum_int(num_samp, nbins, gain, rate, fc, t_int, sdr=None):
         # frequency.
         # See the scipy docs for _spectral_helper().
         win = get_window(WINDOW, nperseg)
-        p_avg_hz = p_avg * ((win.sum()**2) / (win*win).sum()) / rate
+        p_avg_hz = p_xx_tot * ((win.sum()**2) / (win*win).sum()) / rate
 
         # Convert to "dB/Hz" if desired
-        p_avg_db_hz = 10. * np.log10(p_avg_hz)
+        #p_avg_db_hz = 10. * np.log10(p_avg_hz)
 
-        # Shift frequency spectra back to the intended range
-        freqs = freqs + fc
 
         if close_sdr:
             # nice and tidy
@@ -453,9 +470,13 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
     # Force a choice of window to allow converting to PSD after averaging
     # power spectra
     WINDOW = 'hann'
-    nperseg = nbins
-
-    from .post_process import f_throw_fold 
+    # Force a default nperseg for welch() because we need to get a window
+    # of this size later. Use the scipy default 256, but enforce scipy 
+    # conditions on nbins vs. nperseg when nbins gets small.
+    if nbins < 256:
+        nperseg = nbins
+    else:
+        nperseg = 256
 
     # Check inputs:
     assert t_int >= 2.0 * (1.0/fswitch), '''At t_int={} s, frequency switching at fswitch={} Hz means the switching period is longer than integration time. Please choose a longer integration time or shorter switching frequency to ensure enough integration time to dwell on each frequency.'''.format(t_int, fswitch)
@@ -497,30 +518,50 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         freqs_off = np.zeros(nbins)
         p_xx_on = np.zeros(nbins)
         p_xx_off = np.zeros(nbins)
-        cnt = 0
+        cntOn = 0
+        cntOff = 0
 
         # Set the baseline time
         start_time = time.time()
         logging.info('Integration began at {}'.format(time.strftime('%a, %d %b %Y %H:%M:%S', time.localtime(start_time))))
+        # Estimate the power spectrum by Bartlett's method.
+        # Following https://en.wikipedia.org/wiki/Bartlett%27s_method: 
+        # Use scipy.signal.welch to compute one spectrum for each timeseries
+        # of samples from a call to the SDR.
+        # The scipy.signal.welch() method with noverlap=0 is equivalent to 
+        # Bartlett's method, which estimates the spectral content of a time-
+        # series by splitting our num_samp array into K segments of length
+        # nperseg and averaging the K periodograms.
+        # The idea here is to average many calls to welch() across the
+        # requested integration time; this means we can call welch() on each 
+        # set of samples from the SDR, accumulate the binned power estimates,
+        # and average later by the number of spectra taken to reduce the 
+        # noise while still following Barlett's method, and without keeping 
+        # huge arrays of iq samples around in RAM.
 
         # Swap between the two specified frequencies, integrating signal.
         # Time integration loop
         for i in range(num_dwells):
             tick = (i%2 == 0)
+            # odd dwells: fiducial frequency
             if tick:
                 sdr.fc = fc
+            # even dwells: shifted frequency
             else:
                 sdr.fc = fthrow
+            # for current dwell, collect num_loops * num_samp samples total
             for j in range(num_loops):
                 iq = sdr.read_samples(num_samp)
                 # compensate for DC spike
                 iq = (iq.real - iq.real.mean()) + (1j * (iq.imag - iq.imag.mean()))
 
+                # estimate power spectrum of current samples
                 if tick:
                     freqs_on, p_xx = welch(
                         iq,
                         fs=rate,
-                        nperseg=nbins,
+                        nperseg=nperseg,
+                        nfft=nbins,
                         noverlap=0,
                         scaling='spectrum',
                         window=WINDOW,
@@ -528,11 +569,13 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
                         return_onesided=False
                     )
                     p_xx_on += p_xx
+                    cntOn += 1
                 else:
                     freqs_off, p_xx = welch(
                         iq,
                         fs=rate,
-                        nperseg=nbins,
+                        nperseg=nperseg,
+                        nfft=nbins,
                         noverlap=0,
                         scaling='spectrum',
                         window=WINDOW,
@@ -540,28 +583,28 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
                         return_onesided=False
                     )
                     p_xx_off += p_xx
-                cnt += 1
+                    cntOff += 1
         
+        # Compute the average power spectrum based on the number of spectra read
+        # cnt/2 is the number of spectra around the fiducial freq/shifted freq
+        p_xx_on  /= cntOn
+        p_xx_off /= cntOff
+
         end_time = time.time()
         logging.info('Integration ended at {} after {} seconds.'.format(time.strftime('%a, %d %b %Y %H:%M:%S'), end_time-start_time))
-        logging.debug('{} spectra were measured, split between {} and {}.'.format(cnt, fc, fthrow))
-        logging.debug('for an effective integration time of {:.2f}s'.format(num_samp * cnt / rate))
+        logging.debug('{} spectra were measured, split between {} and {}.'.format(cntOn + cntOff, fc, fthrow))
+        logging.debug('for an effective integration time of {:.2f}s'.format(num_samp * (cntOn + cntOff) / rate))
 
+        # Reorder the frequencies so that zero is centered
         freqs_on = np.fft.fftshift(freqs_on)
         freqs_off = np.fft.fftshift(freqs_off)
-
         p_xx_on = np.fft.fftshift(p_xx_on)
         p_xx_off = np.fft.fftshift(p_xx_off)
 
-        # Compute the average power spectrum based on the number of spectra read
-        p_avg_on  = p_xx_on  / cnt
-        p_avg_off = p_xx_off / cnt
         # Shift frequency spectra back to the intended range
-        freqs_on = freqs_on + fc
-        freqs_off = freqs_off + fthrow
+        freqs_on += fc
+        freqs_off += fthrow
 
-        # Fold switched power spectra
-        #freqs_fold, p_fold = f_throw_fold(freqs_on, freqs_off, p_avg_on, p_avg_off)
 
         # Convert to power spectral density
         # A great resource that helped me understand the difference:
@@ -574,10 +617,13 @@ def run_fswitch_int(num_samp, nbins, gain, rate, fc, fthrow, t_int, fswitch=10, 
         # frequency.
         # See the scipy docs for _spectral_helper().
         win = get_window(WINDOW, nperseg)
-        p_avg_on_hz = p_avg_on * ((win.sum()**2) / (win*win).sum()) / rate
-        p_avg_off_hz = p_avg_off * ((win.sum()**2) / (win*win).sum()) / rate
-        #p_fold_hz = p_fold * ((win.sum()**2) / (win*win).sum()) / rate
+        p_avg_on_hz = p_xx_on * ((win.sum()**2) / (win*win).sum()) / rate
+        p_avg_off_hz = p_xx_off * ((win.sum()**2) / (win*win).sum()) / rate
 
+        # Fold switched power spectra
+        #from .post_process import f_throw_fold 
+        #freqs_fold, p_fold = f_throw_fold(freqs_on, freqs_off, p_avg_on, p_avg_off)
+        #p_fold_hz = p_fold * ((win.sum()**2) / (win*win).sum()) / rate
 
 
         if close_sdr:
